@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Palimpsest</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header><div><span class="eyebrow">LOCAL-FIRST PERSONAL AI</span><h1>Palimpsest</h1></div><div class="header-actions"><label for="model-select">Model</label><select id="model-select"></select><a href="/api/dataset/export" class="export">Export dataset</a></div></header>
+  <main>
+    <section class="chat-panel">
+      <div class="panel-heading"><div><h2>Conversation</h2><p id="status">Ready to remember.</p></div><button id="new-chat" class="secondary">New chat</button></div>
+      <div id="messages" class="messages" aria-live="polite"><div class="empty">Start a conversation. Explicit facts and preferences are remembered locally.</div></div>
+      <form id="chat-form"><textarea id="message" rows="2" placeholder="Tell me something or ask a question…" required></textarea><button type="submit" id="send">Send</button></form>
+    </section>
+    <aside>
+      <section class="card"><div class="panel-heading"><h2>Memories</h2><button id="refresh" class="icon-button" title="Refresh">↻</button></div><div id="memories" class="list"><span class="muted">No memories yet.</span></div></section>
+      <section class="card"><h2>User profile</h2><div id="profile" class="list"><span class="muted">No preferences yet.</span></div></section>
+    </aside>
+  </main>
+  <template id="message-template"><article class="message"><div class="role"></div><div class="content"></div><div class="feedback"><button data-rating="1" title="Helpful">👍</button><button data-rating="-1" title="Not helpful">👎</button><button data-edit title="Edit response">Edit</button><button data-ab title="Compare a second candidate">A/B</button></div><div class="ab-candidates" hidden></div></article></template>
+  <script src="/static/app.js"></script>
+</body>
+</html>
