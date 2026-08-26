@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from palimpsest.app import create_app
 from palimpsest.db import Database
+from palimpsest.generation import MockGenerator
 
 
 @pytest.fixture
@@ -74,3 +75,45 @@ def test_models_and_ab_candidates_are_persisted(client):
     stored = api.get(f"/api/experiences/{chat['experience_id']}").json()
     assert stored["feedback_entries"][0]["chosen_response"] == variants[1]["content"]
     assert api.get(f"/api/experiences/{chat['experience_id']}/ab").json()["variants"][1]["content"] == variants[1]["content"]
+
+
+def test_mock_diagnostics_and_unknown_model(client):
+    diagnostics = client.get("/api/model/diagnostics")
+    assert diagnostics.status_code == 200
+    assert diagnostics.json()["backend"] == "mock"
+    assert diagnostics.json()["status"] == "ready"
+    assert client.get("/api/diagnostics").json()["model"] == MockGenerator.model_name
+
+    unknown = client.post("/api/chat", json={"message": "Hello", "model": "not-configured"})
+    assert unknown.status_code == 400
+    assert "Unknown model" in unknown.json()["detail"]
+
+
+class ChunkGenerator:
+    model_name = "chunk-test"
+    adapter = None
+
+    def generate(self, prompt, history, memories, profile):
+        return "fallback"
+
+    def generate_stream(self, prompt, history, memories, profile):
+        yield "first "
+        yield "second"
+
+
+def test_stream_forwards_chunks_and_persists_after_completion():
+    path = Path("data") / f"stream-{uuid4().hex}.db"
+    api = TestClient(create_app(Database(path), generator=ChunkGenerator()))
+    try:
+        response = api.post("/api/chat/stream", json={"message": "stream this"})
+        assert response.status_code == 200
+        assert response.text.count("event: token") == 2
+        assert '"first "' in response.text
+        assert '"second"' in response.text
+        assert "event: done" in response.text
+        assert len(api.get("/api/conversations").json()) == 1
+        conversation_id = api.get("/api/conversations").json()[0]["id"]
+        assert api.get(f"/api/conversations/{conversation_id}").json()["messages"][-1]["content"] == "first second"
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            path.with_name(path.name + suffix).unlink(missing_ok=True)
