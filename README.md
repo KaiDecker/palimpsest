@@ -28,13 +28,33 @@ Open http://127.0.0.1:8000. SQLite data is stored in `data/palimpsest.db` (creat
 - `POST /api/experiences/{id}/feedback` — rating, edit, and A/B chosen/rejected fields.
 - `GET /api/dataset/export` — JSONL download preserving context, memories, model metadata, and feedback.
 - `GET /api/models` — available mock and configured local models.
+- `GET /api/model/diagnostics` (或 `/api/diagnostics`) — 检查本地端点连接、模型列表、延迟和错误信息。
 - `POST /api/experiences/{id}/ab` and `GET /api/experiences/{id}/ab` — generate/read A/B candidates.
 
 Memory extraction is intentionally conservative and offline. Statements such as “I prefer concise answers”, “I study astronomy”, or “remember that …” are candidates; arbitrary chat is not automatically persisted as a fact. Repeated identical memories increase evidence and confidence.
 
-### Optional local model endpoint
+### 可选：接入本地模型
 
-The mock generator remains the default. To use an OpenAI-compatible local server (llama.cpp, vLLM, or LM Studio), set `PALIMPSEST_MODEL_ENDPOINT` to its base URL (for example `http://127.0.0.1:1234/v1`) and optionally set `PALIMPSEST_MODEL_NAME`, `PALIMPSEST_MODEL_NAMES` (comma-separated choices), and `PALIMPSEST_API_KEY`. `OPENAI_BASE_URL`, `OPENAI_MODEL`, and `OPENAI_API_KEY` are also recognized. No provider SDK is required.
+Mock generator 默认保持启用，因此没有模型服务时仍可离线运行。要接入兼容 OpenAI Chat Completions API 的本地服务（Ollama、llama.cpp、vLLM 或 LM Studio），设置服务的基础 URL：
+
+```powershell
+# Ollama（需先 ollama serve；模型名示例）
+$env:PALIMPSEST_MODEL_ENDPOINT = "http://127.0.0.1:11434/v1"
+$env:PALIMPSEST_MODEL_NAME = "qwen2.5:3b"
+
+# LM Studio / llama.cpp 常见地址
+$env:PALIMPSEST_MODEL_ENDPOINT = "http://127.0.0.1:1234/v1"
+$env:PALIMPSEST_MODEL_NAME = "local-model"
+```
+
+可选配置项：
+
+- `PALIMPSEST_MODEL_NAMES`：逗号分隔的模型选择列表；未设置时只显示 `PALIMPSEST_MODEL_NAME`。
+- `PALIMPSEST_API_KEY`：需要鉴权的本地代理使用；也接受 `OPENAI_API_KEY`。
+- `PALIMPSEST_MODEL_TIMEOUT`：请求超时秒数，默认 120；诊断请求最多等待 5 秒。
+- `OPENAI_BASE_URL`、`OPENAI_MODEL`：兼容已有 OpenAI 风格环境变量。
+
+端点可以填写 `/v1` 基础路径，也可以直接填写 `/chat/completions`；客户端会自动补齐路径。启动后访问 `/api/model/diagnostics`，或查看页面顶部模型旁的状态，即可确认连接和模型列表。`/api/chat/stream` 会转发服务端的 SSE token；如果服务忽略 `stream=true` 而返回普通 JSON，则自动以单块 SSE 兼容返回。
 
 ## Test
 

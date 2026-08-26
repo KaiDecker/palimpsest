@@ -72,7 +72,17 @@ def _serialize_message(row: dict[str, Any]) -> dict[str, Any]:
 
 def create_app(db: Database | None = None, generator: Generator | None = None) -> FastAPI:
     database = db or Database()
-    model = generator or OpenAICompatibleGenerator.from_env() or MockGenerator()
+    configuration_error: str | None = None
+    if generator is not None:
+        model = generator
+    else:
+        try:
+            model = OpenAICompatibleGenerator.from_env() or MockGenerator()
+        except ValueError as exc:
+            # A typo in an environment variable must not make the offline app
+            # impossible to start. Keep the error available to diagnostics.
+            configuration_error = str(exc)
+            model = MockGenerator()
     app = FastAPI(title="Palimpsest", version="0.1.0", description="Local-first personal AI MVP")
     app.state.db = database
     app.state.generator = model
@@ -93,6 +103,19 @@ def create_app(db: Database | None = None, generator: Generator | None = None) -
         if isinstance(model, OpenAICompatibleGenerator):
             models.extend({"id": name, "name": name, "backend": "openai-compatible", "available": True} for name in OpenAICompatibleGenerator.model_names_from_env(model.model_name))
         return {"default": model.model_name, "models": models}
+
+    @app.get("/api/model/diagnostics")
+    def model_diagnostics() -> dict[str, Any]:
+        """Return local model connectivity information without failing the API."""
+        if configuration_error:
+            return {"backend": "openai-compatible", "status": "error", "reachable": False, "endpoint": None, "models_endpoint": None, "model": model.model_name, "models": [], "latency_ms": 0, "error": configuration_error}
+        if isinstance(model, OpenAICompatibleGenerator):
+            return {"backend": "openai-compatible", **model.diagnose()}
+        return {"backend": "mock", "status": "ready", "reachable": True, "endpoint": None, "models_endpoint": None, "model": model.model_name, "models": [model.model_name], "latency_ms": 0, "error": None}
+
+    @app.get("/api/diagnostics")
+    def diagnostics_alias() -> dict[str, Any]:
+        return model_diagnostics()
 
     def selected_model(name: str | None) -> Generator:
         if not name or name == model.model_name:
@@ -116,30 +139,43 @@ def create_app(db: Database | None = None, generator: Generator | None = None) -
             raise HTTPException(status_code=404, detail="Conversation not found")
         return {"conversation": dict(conversation), "messages": [_serialize_message(row) for row in _messages(database, conversation_id)]}
 
-    def run_chat(payload: ChatRequest) -> dict[str, Any]:
+    def prepare_chat(payload: ChatRequest) -> dict[str, Any]:
         generator = selected_model(payload.model)
         conversation = _conversation(database, payload.conversation_id, payload.message)
         history = _messages(database, conversation["id"])
         memories = retrieve(database, payload.message)
         with database.connection() as conn:
             profile = [dict(row) for row in conn.execute("SELECT * FROM profile ORDER BY updated_at DESC").fetchall()]
-        try:
-            response = generator.generate(payload.message, [{"role": row["role"], "content": row["content"]} for row in history], memories, profile)
-        except GenerationError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"generator": generator, "conversation": conversation, "history": history, "memories": memories, "profile": profile, "prompt": payload.message}
+
+    def persist_chat(prepared: dict[str, Any], response: str) -> dict[str, Any]:
+        generator = prepared["generator"]
+        conversation = prepared["conversation"]
+        history = prepared["history"]
+        memories = prepared["memories"]
+        prompt = prepared["prompt"]
         now = utc_now()
         user_message_id, assistant_message_id, experience_id = database.new_id(), database.new_id(), database.new_id()
         with database.connection() as conn:
-            conn.execute("INSERT INTO messages VALUES(?,?,?,?,?,?)", (user_message_id, conversation["id"], "user", payload.message, now, "{}"))
+            conn.execute("INSERT INTO messages VALUES(?,?,?,?,?,?)", (user_message_id, conversation["id"], "user", prompt, now, "{}"))
             conn.execute("INSERT INTO messages VALUES(?,?,?,?,?,?)", (assistant_message_id, conversation["id"], "assistant", response, now, database.json_value({"experience_id": experience_id})))
             conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation["id"]))
-            conn.execute("INSERT INTO experiences VALUES(?,?,?,?,?,?,?,?,?)", (experience_id, conversation["id"], payload.message, response, database.json_value(history), database.json_value(memories), "{}", database.json_value({"base_model": generator.model_name, "adapter": generator.adapter}), now))
-        extracted = save_extracted(database, payload.message)
+            conn.execute("INSERT INTO experiences VALUES(?,?,?,?,?,?,?,?,?)", (experience_id, conversation["id"], prompt, response, database.json_value(history), database.json_value(memories), "{}", database.json_value({"base_model": generator.model_name, "adapter": generator.adapter}), now))
+        extracted = save_extracted(database, prompt)
         # Explicit preference statements are also represented in the user model.
         for item in extracted:
             if item["type"] == "preference":
                 _upsert_profile("preference.communication", item["content"], 0.65, "explicit_heuristic")
         return {"conversation_id": conversation["id"], "experience_id": experience_id, "response": response, "memories": memories, "extracted_memories": extracted, "model": {"base_model": generator.model_name, "adapter": generator.adapter}}
+
+    def run_chat(payload: ChatRequest) -> dict[str, Any]:
+        prepared = prepare_chat(payload)
+        generator = prepared["generator"]
+        try:
+            response = generator.generate(prepared["prompt"], [{"role": row["role"], "content": row["content"]} for row in prepared["history"]], prepared["memories"], prepared["profile"])
+        except GenerationError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return persist_chat(prepared, response)
 
     @app.post("/api/chat")
     def chat(payload: ChatRequest) -> dict[str, Any]:
@@ -147,12 +183,31 @@ def create_app(db: Database | None = None, generator: Generator | None = None) -
 
     @app.post("/api/chat/stream")
     def chat_stream(payload: ChatRequest) -> StreamingResponse:
-        result = run_chat(payload)
-        # SSE chunks make the UI compatible with a real token generator later.
+        prepared = prepare_chat(payload)
+        generator = prepared["generator"]
+
         def events():
-            yield f"event: metadata\ndata: {json.dumps({k: result[k] for k in ('conversation_id', 'experience_id', 'memories', 'extracted_memories', 'model')}, ensure_ascii=False)}\n\n"
-            yield f"event: token\ndata: {json.dumps(result['response'], ensure_ascii=False)}\n\n"
-            yield "event: done\ndata: {}\n\n"
+            metadata = {"conversation_id": prepared["conversation"]["id"], "memories": prepared["memories"], "model": {"base_model": generator.model_name, "adapter": generator.adapter}}
+            yield f"event: metadata\ndata: {json.dumps(metadata, ensure_ascii=False)}\n\n"
+            chunks: list[str] = []
+            try:
+                stream_method = getattr(generator, "generate_stream", None)
+                if callable(stream_method):
+                    for chunk in stream_method(prepared["prompt"], [{"role": row["role"], "content": row["content"]} for row in prepared["history"]], prepared["memories"], prepared["profile"]):
+                        if chunk:
+                            chunks.append(chunk)
+                            yield f"event: token\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                else:
+                    chunk = generator.generate(prepared["prompt"], [{"role": row["role"], "content": row["content"]} for row in prepared["history"]], prepared["memories"], prepared["profile"])
+                    chunks.append(chunk)
+                    yield f"event: token\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                response = "".join(chunks)
+                if not response.strip():
+                    raise GenerationError("Local model endpoint returned an empty response")
+                result = persist_chat(prepared, response)
+                yield f"event: done\ndata: {json.dumps({k: result[k] for k in ('conversation_id', 'experience_id', 'extracted_memories', 'model')}, ensure_ascii=False)}\n\n"
+            except GenerationError as exc:
+                yield f"event: error\ndata: {json.dumps({'detail': str(exc)}, ensure_ascii=False)}\n\n"
         return StreamingResponse(events(), media_type="text/event-stream")
 
     @app.get("/api/experiences/{experience_id}")

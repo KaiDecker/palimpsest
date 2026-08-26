@@ -19,6 +19,7 @@ function addMessage(role, content, experienceId = null) {
     });
   } else article.querySelector('.feedback').remove();
   $('#messages').appendChild(template); $('#messages').scrollTop = $('#messages').scrollHeight;
+  return $('#messages').lastElementChild;
 }
 
 function renderCandidates(article, experienceId, variants) {
@@ -37,7 +38,33 @@ async function loadSidebar() { const [memoryResponse, profileResponse] = await P
 
 async function loadConversation() { if (!conversationId) return; const response = await fetch(`/api/conversations/${conversationId}`); if (!response.ok) return; const data = await response.json(); $('#messages').innerHTML = ''; data.messages.forEach((message) => addMessage(message.role, message.content, message.metadata?.experience_id)); }
 
-async function loadModels() { const response = await fetch('/api/models'); const data = await response.json(); $('#model-select').innerHTML = data.models.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join(''); $('#model-select').value = data.default; }
+async function loadModels() { try { const response = await fetch('/api/models'); const data = await response.json(); if (!response.ok) throw new Error(data.detail || 'Unable to load models'); $('#model-select').innerHTML = data.models.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join(''); $('#model-select').value = data.default; } catch (error) { $('#model-status').textContent = `Model list error: ${error.message}`; $('#model-status').className = 'model-status error'; } }
+async function loadDiagnostics() { try { const response = await fetch('/api/model/diagnostics'); const data = await response.json(); if (!response.ok) throw new Error(data.detail || 'Diagnostic request failed'); const status = $('#model-status'); status.className = `model-status ${data.status}`; status.textContent = data.status === 'error' ? `Disconnected: ${data.error}` : (data.backend === 'mock' ? 'Offline mock ready' : `Connected · ${data.model}`); } catch (error) { $('#model-status').textContent = `Connection error: ${error.message}`; $('#model-status').className = 'model-status error'; } }
 
-$('#chat-form').addEventListener('submit', async (event) => { event.preventDefault(); const input = $('#message'); const message = input.value.trim(); if (!message) return; input.value = ''; addMessage('user', message); $('#send').disabled = true; $('#status').textContent = 'Thinking…'; try { const response = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({conversation_id:conversationId, message, model: $('#model-select').value || null})}); const result = await response.json(); if (!response.ok) throw new Error(result.detail || 'Request failed'); conversationId = result.conversation_id; addMessage('assistant', result.response, result.experience_id); $('#status').textContent = 'Saved locally.'; loadSidebar(); } catch (error) { addMessage('assistant', `Could not reach the local server: ${error.message}`); $('#status').textContent = 'Connection error'; } finally { $('#send').disabled = false; input.focus(); } });
-$('#new-chat').addEventListener('click', () => { conversationId = null; $('#messages').innerHTML = '<div class="empty">Start a conversation. Explicit facts and preferences are remembered locally.</div>'; $('#status').textContent = 'Ready to remember.'; }); $('#refresh').addEventListener('click', loadSidebar); loadModels(); loadSidebar();
+async function streamChat(message) {
+  const response = await fetch('/api/chat/stream', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({conversation_id:conversationId, message, model: $('#model-select').value || null})});
+  if (!response.ok || !response.body) throw new Error(`Request failed (${response.status})`);
+  const article = addMessage('assistant', ''); const content = article.querySelector('.content');
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = '';
+  try {
+    while (true) {
+      const {value, done} = await reader.read(); buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+      const events = buffer.split('\n\n'); buffer = events.pop() || '';
+      for (const block of events) {
+        const event = block.split('\n').find((line) => line.startsWith('event:'))?.slice(6).trim();
+        const raw = block.split('\n').find((line) => line.startsWith('data:'))?.slice(5).trim();
+        if (!raw) continue; const data = JSON.parse(raw);
+        if (event === 'metadata') conversationId = data.conversation_id;
+        if (event === 'token') { answer += data; content.textContent = answer; $('#messages').scrollTop = $('#messages').scrollHeight; }
+        if (event === 'error') throw new Error(data.detail || 'Model stream failed');
+        if (event === 'done') { article.remove(); addMessage('assistant', answer, data.experience_id); }
+      }
+      if (done) break;
+    }
+  } catch (error) {
+    article.remove(); throw error;
+  }
+}
+
+$('#chat-form').addEventListener('submit', async (event) => { event.preventDefault(); const input = $('#message'); const message = input.value.trim(); if (!message) return; input.value = ''; addMessage('user', message); $('#send').disabled = true; $('#status').textContent = 'Thinking…'; try { await streamChat(message); $('#status').textContent = 'Saved locally.'; loadSidebar(); loadDiagnostics(); } catch (error) { addMessage('assistant', `Model request failed: ${error.message}`); $('#status').textContent = 'Connection error'; loadDiagnostics(); } finally { $('#send').disabled = false; input.focus(); } });
+$('#new-chat').addEventListener('click', () => { conversationId = null; $('#messages').innerHTML = '<div class="empty">Start a conversation. Explicit facts and preferences are remembered locally.</div>'; $('#status').textContent = 'Ready to remember.'; }); $('#refresh').addEventListener('click', loadSidebar); $('#model-select').addEventListener('change', loadDiagnostics); loadModels(); loadDiagnostics(); loadSidebar();

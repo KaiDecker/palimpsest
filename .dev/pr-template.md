@@ -1,22 +1,22 @@
-## Why
-<!-- Why is this change needed? What problem or limitation does it address? -->
+## 为什么
+<!-- 为什么需要这个改动？它解决了什么问题或限制？ -->
 
-## Changes
-<!-- Keep this concise. The diff already explains implementation details. -->
+## 改动
+<!-- 保持简洁。具体实现细节通常已经可以从 diff 中看出来。 -->
 -
 
-## Verification
-<!-- List what you actually verified. Remove anything that does not apply. -->
+## 验证
+<!-- 写实际做过的验证；不适用的内容直接删除。 -->
 -
 
-<!-- Optional sections for non-trivial PRs:
+<!-- 非简单 PR 可按需增加：
 
-## Decisions
-- Chose X over Y because ...
+## 决策
+- 选择 X 而不是 Y，因为……
 
-## Follow-ups
+## 后续
 - [ ] ...
 
-## Notes
-Anything worth remembering later: trade-offs, known limitations, migration notes, etc.
+## 备注
+记录以后值得回看的内容，例如取舍、已知限制、迁移事项等。
 -->
